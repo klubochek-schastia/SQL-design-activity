@@ -1,0 +1,142 @@
+A brief description of the database - tables and views that it consists of.
+
+Tables:
+o aircrafts (Planes)
+o airports (Airports)
+o boarding_passes (Boarding passes)
+o bookings (Bookings)
+o flights (Flights)
+o seats
+o ticket_flights (Flights)
+o tickets (Tickets)
+
+Performance:
+o bookings.flights_v (Flights) 
+
+Materialized view:
+o bookings.routes
+------------------------------------------------------------------------------------------------------------------------------------------
+1.	Which cities have more than one airport?
+
+select distinct city
+          from(
+                select city, airport_name, row_number() over (partition by city    order by airport_name)
+          from airports a) c
+          where c.row_number >1
+          
+------------------------------------------------------------------------------------------------------------------------------------------
+2. Which airports have flights operated by aircraft with the maximum flight range?
+
+select distinct airport_name
+       from flights f
+join aircrafts ac on ac.aircraft_code = f.aircraft_code 
+join airports ap on ap.airport_code = f.departure_airport
+       where ac."range" = (select max(ac."range")
+	                                         from aircrafts ac)
+                                           
+------------------------------------------------------------------------------------------------------------------------------------------
+3.	Display 10 flights with the maximum departure delay time.
+
+select flight_no, (actual_departure-scheduled_departure) as delayed 
+	from flights f 
+where (actual_departure-scheduled_departure) is not null 
+order by delayed desc
+limit 10
+
+------------------------------------------------------------------------------------------------------------------------------------------
+4.	Were there any bookings for which boarding passes were not received?
+
+select b.book_ref 
+        from bookings b 
+left join tickets t on t.book_ref = b.book_ref 
+left join boarding_passes bp on t.ticket_no = bp.ticket_no 
+       where bp.boarding_no is null
+       group by b.book_ref
+
+------------------------------------------------------------------------------------------------------------------------------------------
+5.	Find the number of available seats for each flight, their % ratio to the total number of seats on the plane.
+Add a column with cumulative total - the total accumulation of the number of passengers taken out of each airport for each day.
+That is, this column should reflect the cumulative amount - how many people have already taken off from this airport on this or 
+earlier flights during the day.
+
+with c1 as(
+       select s.aircraft_code, count(s.seat_no) as all_seats
+       from seats s
+       join aircrafts a on a.aircraft_code = s.aircraft_code
+       group by s.aircraft_code
+ ),c2 as(
+       select a.airport_name, f.actual_departure, count (bp.seat_no) as busy, c1.all_seats
+       from boarding_passes bp
+       join flights f on f.flight_id = bp.flight_id 
+       join airports a on a.airport_code = f.departure_airport 
+       join c1 on c1.aircraft_code=f.aircraft_code 
+       group by a.airport_name, f.actual_departure, c1.all_seats)
+  select c2.airport_name, c2.actual_departure, 
+      (c2.all_seats - c2.busy) as free,
+      (c2.all_seats - c2.busy)*100/c2.all_seats as percent_free,
+      sum(c2.busy) over (partition by c2.airport_name, 
+      date_trunc('day', c2.actual_departure) order by c2.actual_departure) as accumulation
+  from c2
+
+------------------------------------------------------------------------------------------------------------------------------------------
+6.	Find the percentage of flights by type of aircraft from the total number.
+
+select a.model, count(*)*100./(select count(*) as "общее количество"
+from flights f)
+from flights f
+join aircrafts a on a.aircraft_code = f.aircraft_code
+group by a.model
+
+------------------------------------------------------------------------------------------------------------------------------------------
+7.	Were there any cities that can be reached by business class cheaper than economy class as part of a flight?
+
+with c1 as(
+          select fare_conditions as Economy, tf.amount as E_amount, f.flight_id, a.city
+          from ticket_flights tf
+          join flights f on f.flight_id = tf.flight_id
+          join airports a on f.arrival_airport = a.airport_code
+          where fare_conditions like 'Economy'
+           ),
+    c2 as(
+         select fare_conditions as Business, tf.amount as B_amount, c1.Economy, c1.E_amount, c1.city
+         from ticket_flights tf
+         join c1 on c1.flight_id = tf.flight_id
+         where fare_conditions like 'Business'
+          )
+       select c2.city
+       from c2
+       where (c2.B_amount-c2.E_amount)<0
+
+------------------------------------------------------------------------------------------------------------------------------------------
+8.	Between which cities there are no direct flights?
+
+create materialized view flights_all as 
+select a.city as город_вылета, b.city as город_прилета
+from flights f
+join airports a on a.airport_code=f.departure_airport
+join airports b on b.airport_code=f.arrival_airport
+
+select *
+from (select a1.city, a2.city
+from airports a1, airports a2
+where a1.city!= a2.city) t
+except
+select *
+from flights_all
+
+------------------------------------------------------------------------------------------------------------------------------------------
+9.	Calculate the distance between airports connected by direct flights, compare with the permissible maximum flight distance in the aircraft
+serving these flights *
+
+select distinct dep.airport_name as departure, ar.airport_name as arrival,
+(acos(sin(radians(dep.latitude))*sin(radians(ar.latitude)) + 
+cos(radians(dep.latitude))*cos(radians(ar.latitude))*cos(radians(dep.longitude) - radians(ar.longitude))))*6371 as "range",
+     case 
+         when a."range"-(acos(sin(radians(dep.latitude))*sin(radians(ar.latitude)) + 
+cos(radians(dep.latitude))*cos(radians(ar.latitude))*cos(radians(dep.longitude) - radians(ar.longitude))))*6371> 0 then 'долетит'
+      else 'не долетит'
+    end
+from flights f 
+join airports dep on dep.airport_code = f.departure_airport 
+join airports ar on ar.airport_code = f.arrival_airport
+join aircrafts a on a.aircraft_code = f.aircraft_code
